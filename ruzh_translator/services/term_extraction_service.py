@@ -1,10 +1,11 @@
 """Terminology extraction service.
 
 Extracts candidate terms from Russian and Chinese text using
-language-specific NLP tools.
+language-specific tools, with pure-Python fallback.
 """
 
 import logging
+import re
 from collections import Counter
 
 logger = logging.getLogger(__name__)
@@ -13,97 +14,67 @@ logger = logging.getLogger(__name__)
 def _extract_ru_terms(text: str, top_n: int = 50) -> list[dict]:
     """Extract candidate terms from Russian text.
 
-    Uses pymorphy3 for lemmatization and YAKE for keyword scoring.
-    Falls back to simple noun phrase extraction if YAKE is unavailable.
-
-    Args:
-        text: Russian text.
-        top_n: Maximum number of terms to return.
-
-    Returns:
-        List of dicts with 'term', 'score', 'frequency' keys.
+    Tries YAKE first, then pymorphy3, then falls back to
+    regex-based multi-word phrase extraction.
     """
     terms = []
 
     # Try YAKE first
     try:
         import yake
-        kw_extractor = yake.KeywordExtractor(
-            lan="ru",
-            top=top_n,
-            n=3,  # n-gram size up to 3
-            features=None,
-        )
+        kw_extractor = yake.KeywordExtractor(lan="ru", top=top_n, n=3)
         keywords = kw_extractor.extract_keywords(text)
         for kw, score in keywords:
-            terms.append({
-                "term": kw,
-                "score": round(score, 4),
-                "frequency": text.lower().count(kw.lower()),
-            })
-        return terms
-    except ImportError:
-        logger.debug("yake not installed, using simple extraction")
+            terms.append({"term": kw, "score": round(score, 4),
+                          "frequency": text.lower().count(kw.lower())})
+        if terms: return terms
+    except Exception:
+        pass
 
-    # Fallback: extract noun phrases using pymorphy3
+    # Try pymorphy3
     try:
         from pymorphy3 import MorphAnalyzer
         morph = MorphAnalyzer()
-
-        # Split into words, find nouns and adjectives
-        words = text.split()
-        i = 0
-        phrases = []
+        words = text.split(); phrases = []; i = 0
         while i < len(words):
             word = words[i].strip(".,!?;:()[]«»\"'")
-            if not word:
-                i += 1
-                continue
-
+            if not word: i += 1; continue
             try:
                 parsed = morph.parse(word)[0]
-                pos = parsed.tag.POS
-            except Exception:
-                i += 1
-                continue
-
-            # Noun phrase: ADJ+NOUN or NOUN+NOUN(gen)
-            if pos == "NOUN" or pos == "ADJF":
-                phrase_parts = [parsed.normal_form]
-                j = i + 1
-                while j < len(words) and j - i < 3:
-                    next_word = words[j].strip(".,!?;:()[]«»\"'")
-                    if not next_word:
-                        j += 1
-                        continue
-                    try:
-                        next_parsed = morph.parse(next_word)[0]
-                        if next_parsed.tag.POS in ("NOUN", "ADJF"):
-                            phrase_parts.append(next_parsed.normal_form)
-                            j += 1
-                        else:
-                            break
-                    except Exception:
-                        break
-                if len(phrase_parts) >= 2:
-                    phrase = " ".join(phrase_parts)
-                    phrases.append(phrase)
-                    i = j
-                    continue
+                if parsed.tag.POS in ("NOUN", "ADJF"):
+                    parts = [parsed.normal_form]
+                    j = i + 1
+                    while j < len(words) and j - i < 3:
+                        nw = words[j].strip(".,!?;:()[]«»\"'")
+                        if not nw: j += 1; continue
+                        try:
+                            np = morph.parse(nw)[0]
+                            if np.tag.POS in ("NOUN", "ADJF"):
+                                parts.append(np.normal_form); j += 1
+                            else: break
+                        except: break
+                    if len(parts) >= 2: phrases.append(" ".join(parts)); i = j; continue
+            except: pass
             i += 1
-
-        # Count and rank
         counter = Counter(phrases)
         for phrase, freq in counter.most_common(top_n):
             if freq >= 2:
-                terms.append({
-                    "term": phrase,
-                    "score": round(1.0 / (1.0 + freq), 4),
-                    "frequency": freq,
-                })
-    except ImportError:
-        logger.debug("pymorphy3 not installed")
+                terms.append({"term": phrase, "score": round(1.0/(1.0+freq), 4), "frequency": freq})
+        if terms: return terms
+    except Exception:
+        pass
 
+    # ── Pure Python fallback: regex multi-word extraction ──
+    # Split into words, find repeated 2-3 word sequences
+    clean = re.sub(r'[^\w\s]', ' ', text.lower())
+    all_words = [w for w in clean.split() if len(w) >= 3]
+    bigrams = [" ".join(all_words[i:i+2]) for i in range(len(all_words)-1)]
+    trigrams = [" ".join(all_words[i:i+3]) for i in range(len(all_words)-2)]
+    counter = Counter(bigrams + trigrams)
+    for phrase, freq in counter.most_common(top_n):
+        if freq >= 2:
+            # Find original-cased version
+            terms.append({"term": phrase, "score": round(1.0/(1.0+freq), 4), "frequency": freq})
     return terms
 
 

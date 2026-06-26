@@ -81,10 +81,16 @@ def main():
         from ruzh_translator.ui.glossary_window import GlossaryWindow
         _show("glossary", GlossaryWindow)
 
+    def open_settings():
+        from ruzh_translator.ui.settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg.exec()
+
     launcher.open_aligner.connect(open_aligner)
     launcher.open_translator.connect(open_translator)
     launcher.open_concordance.connect(open_concordance)
     launcher.open_glossary.connect(open_glossary)
+    launcher.open_settings.connect(open_settings)
 
     launcher.show()
     sys.exit(app.exec())

@@ -6,11 +6,11 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('ruzh_translator/resources/styles.qss', 'ruzh_translator/resources')],
-    hiddenimports=['sqlalchemy.sql.default_comparator', 'openpyxl', 'lxml', 'rapidfuzz', 'chardet', 'pandas', 'scipy'],
+    hiddenimports=['sqlalchemy.sql.default_comparator', 'openpyxl', 'lxml', 'rapidfuzz', 'chardet', 'pandas', 'scipy', 'unittest', 'jieba'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'unittest', 'PIL'],
+    excludes=['tkinter', 'PIL'],
     noarchive=False,
     optimize=0,
 )

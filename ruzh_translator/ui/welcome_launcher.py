@@ -1,7 +1,8 @@
 """Welcome launcher v5: 4 reliable cards using proper QFrame subclass."""
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QGridLayout, QLabel, QFrame, QSizePolicy,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPushButton, QFrame, QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -83,6 +84,7 @@ class WelcomeLauncher(QWidget):
     open_translator = Signal()
     open_concordance = Signal()
     open_glossary = Signal()
+    open_settings = Signal()
 
     def __init__(self):
         super().__init__()
@@ -93,6 +95,15 @@ class WelcomeLauncher(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(40, 28, 40, 28)
         layout.setSpacing(12)
+
+        # Top bar with title + settings
+        top = QHBoxLayout()
+        top.addStretch()
+        settings_btn = QPushButton("⚙️ 设置")
+        settings_btn.setStyleSheet("QPushButton { border: 1px solid #E0E0E0; border-radius: 6px; padding: 4px 12px; background: #FFF; } QPushButton:hover { background: #E3F2FD; }")
+        settings_btn.clicked.connect(self._open_settings)
+        top.addWidget(settings_btn)
+        layout.addLayout(top)
 
         title = QLabel(APP_NAME)
         title.setAlignment(Qt.AlignCenter)
@@ -127,3 +138,6 @@ class WelcomeLauncher(QWidget):
         ver.setAlignment(Qt.AlignCenter)
         ver.setStyleSheet("color: #CFD8DC; font-size: 10px;")
         layout.addWidget(ver)
+
+    def _open_settings(self):
+        self.open_settings.emit()
