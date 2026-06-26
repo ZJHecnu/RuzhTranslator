@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLabel, QPushButton, QComboBox,
     QFileDialog, QMessageBox, QProgressBar, QGroupBox, QAbstractItemView, QMenu,
 )
-from PySide6.QtCore import Qt, Signal, QPoint, QRect
+from PySide6.QtCore import Qt, Signal, QPoint, QRect, QThread
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QPainterPath, QBrush, QAction
 
 from ruzh_translator.models.base import get_session
@@ -64,6 +64,34 @@ class ConnectorWidget(QWidget):
             p.setPen(Qt.white); p.setFont(QFont("sans-serif", 7))
             p.drawText(QRect(mx - 8, my - 6, 16, 12), Qt.AlignCenter, str(int(conf * 100)))
         p.end()
+
+
+class AlignWorker(QThread):
+    """Background thread for alignment computation."""
+    finished = Signal(list)  # pairs_data
+    error = Signal(str)
+
+    def __init__(self, src_sents, tgt_sents, method):
+        super().__init__()
+        self.src_sents = src_sents
+        self.tgt_sents = tgt_sents
+        self.method = method
+
+    def run(self):
+        try:
+            pairs = align_documents(
+                "\n\n".join(self.src_sents), "\n\n".join(self.tgt_sents),
+                src_lang="ru", tgt_lang="zh-CN",
+                para_method=self.method, sent_method=self.method,
+            )
+            data = []
+            for pd in pairs:
+                si = next((i for i, s in enumerate(self.src_sents) if s.strip() == pd["source_text"].strip()), len(data))
+                ti = next((i for i, s in enumerate(self.tgt_sents) if s.strip() == pd["target_text"].strip()), len(data))
+                data.append((min(si, len(self.src_sents)-1), min(ti, len(self.tgt_sents)-1), pd["confidence"]))
+            self.finished.emit(data)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class AlignerWindow(QMainWindow):
@@ -214,23 +242,44 @@ class AlignerWindow(QMainWindow):
     def _on_align(self):
         if not self._src_sents or not self._tgt_sents:
             QMessageBox.warning(self, "提示", "请先导入源语和目标语文件"); return
+
+        # Warn if large files
+        total = len(self._src_sents) + len(self._tgt_sents)
+        if total > 500:
+            reply = QMessageBox.question(self, "大文件警告",
+                f"共有 {total} 个句子，语义对齐可能需要较长时间。\n\n"
+                f"建议：\n"
+                f"• 选择「顺序」对齐模式获得更快速度\n"
+                f"• 或拆分文件为较小段落\n\n"
+                f"是否继续语义对齐？",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.No:
+                return
+
         self._progress.setVisible(True); self._progress.setRange(0, 0)
-        try:
-            method = "semantic" if "语义" in self._method_combo.currentText() else "sequential"
-            pairs = align_documents("\n\n".join(self._src_sents), "\n\n".join(self._tgt_sents), src_lang="ru", tgt_lang="zh-CN", para_method=method, sent_method=method)
-            self._pairs_data = []
-            for pd in pairs:
-                si = next((i for i, s in enumerate(self._src_sents) if s.strip() == pd["source_text"].strip()), len(self._pairs_data))
-                ti = next((i for i, s in enumerate(self._tgt_sents) if s.strip() == pd["target_text"].strip()), len(self._pairs_data))
-                self._pairs_data.append((min(si, len(self._src_sents)-1), min(ti, len(self._tgt_sents)-1), pd["confidence"]))
-            self._connector.set_data(self._pairs_data, len(self._src_sents), len(self._tgt_sents))
-            self._apply_colors()
-            hi = sum(1 for _,_,c in self._pairs_data if c > 0.8)
-            self._status.setText(f"✓ 对齐完成: {len(self._pairs_data)} 对 | 🟢{hi} 🟠{sum(1 for _,_,c in self._pairs_data if 0.5<=c<=0.8)} 🔴{sum(1 for _,_,c in self._pairs_data if c<0.5)}")
-        except Exception as ex:
-            QMessageBox.critical(self, "对齐失败", str(ex))
-        finally:
-            self._progress.setVisible(False)
+        self._status.setText("⏳ 正在对齐，请稍候...")
+
+        method = "semantic" if "语义" in self._method_combo.currentText() else "sequential"
+        self._worker = AlignWorker(self._src_sents, self._tgt_sents, method)
+        self._worker.finished.connect(self._on_align_done)
+        self._worker.error.connect(self._on_align_error)
+        self._worker.start()
+
+    def _on_align_done(self, data):
+        self._pairs_data = data
+        self._connector.set_data(self._pairs_data, len(self._src_sents), len(self._tgt_sents))
+        self._apply_colors()
+        hi = sum(1 for _, _, c in self._pairs_data if c > 0.8)
+        self._status.setText(
+            f"✓ 对齐完成: {len(self._pairs_data)} 对 | "
+            f"🟢{hi} 🟠{sum(1 for _,_,c in self._pairs_data if 0.5<=c<=0.8)} "
+            f"🔴{sum(1 for _,_,c in self._pairs_data if c<0.5)}"
+        )
+        self._progress.setVisible(False)
+
+    def _on_align_error(self, msg):
+        self._progress.setVisible(False)
+        QMessageBox.critical(self, "对齐失败", msg)
 
     def _apply_colors(self):
         aligned_src = set(); aligned_tgt = set()
