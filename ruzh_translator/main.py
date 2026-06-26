@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """Ruzh Translator — Aligner · Translator · Concordance · Glossary."""
 
+import os
 import sys
 from pathlib import Path
+
+if sys.platform == "darwin" and getattr(sys, "frozen", False):
+    bundle = Path(sys.executable).resolve().parent.parent
+    plugins = bundle / "Frameworks" / "PySide6" / "Qt" / "plugins"
+    if plugins.is_dir():
+        os.environ["QT_PLUGIN_PATH"] = str(plugins)
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
@@ -10,13 +17,6 @@ from PySide6.QtGui import QFont
 
 from ruzh_translator.config import APP_NAME, ORG_NAME
 from ruzh_translator.models.base import init_db
-
-# Explicit imports — required for PyInstaller
-from ruzh_translator.ui.welcome_launcher import WelcomeLauncher
-from ruzh_translator.ui.aligner_window import AlignerWindow
-from ruzh_translator.ui.translator_window import TranslatorWindow
-from ruzh_translator.ui.concordance_window import ConcordanceWindow
-from ruzh_translator.ui.glossary_window import GlossaryWindow
 
 
 def main():
@@ -29,33 +29,62 @@ def main():
         ["PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "sans-serif"], 13
     ))
 
-    # Stylesheet
-    p = Path(__file__).parent / "resources" / "styles.qss"
-    if p.exists():
-        with open(p, "r", encoding="utf-8") as f:
+    css = Path(__file__).parent / "resources" / "styles.qss"
+    if css.exists():
+        with open(css, "r", encoding="utf-8") as f:
             app.setStyleSheet(f.read())
 
+    from ruzh_translator.ui.welcome_launcher import WelcomeLauncher
     launcher = WelcomeLauncher()
 
-    # Track open windows: one per module
     _windows = {}
 
-    def _show(name: str, factory):
-        if name in _windows:
-            w = _windows[name]
-            w.raise_()
-            w.activateWindow()
-        else:
-            w = factory()
-            w.setAttribute(Qt.WA_DeleteOnClose)
-            w.destroyed.connect(lambda: _windows.pop(name, None))
-            _windows[name] = w
-            w.show()
+    def _show(name, factory):
+        w = _windows.get(name)
+        if w is not None:
+            try:
+                if w.isVisible():
+                    w.raise_()
+                    w.activateWindow()
+                    return
+            except RuntimeError:
+                pass
+            _windows.pop(name, None)
 
-    launcher.open_aligner.connect(lambda: _show("aligner", AlignerWindow))
-    launcher.open_translator.connect(lambda: _show("translator", TranslatorWindow))
-    launcher.open_concordance.connect(lambda: _show("concordance", ConcordanceWindow))
-    launcher.open_glossary.connect(lambda: _show("glossary", GlossaryWindow))
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            w = factory()
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        _windows[name] = w
+        w.setAttribute(Qt.WA_DeleteOnClose)
+        w.destroyed.connect(lambda obj=None, n=name: _windows.pop(n, None))
+        w.show()
+
+    # ── Each handler is a regular function so PyInstaller finds the imports ──
+
+    def open_aligner():
+        from ruzh_translator.ui.aligner_window import AlignerWindow
+        _show("aligner", AlignerWindow)
+
+    def open_translator():
+        from ruzh_translator.ui.translator_window import TranslatorWindow
+        _show("translator", TranslatorWindow)
+
+    def open_concordance():
+        from ruzh_translator.ui.concordance_window import ConcordanceWindow
+        _show("concordance", ConcordanceWindow)
+
+    def open_glossary():
+        from ruzh_translator.ui.glossary_window import GlossaryWindow
+        _show("glossary", GlossaryWindow)
+
+    launcher.open_aligner.connect(open_aligner)
+    launcher.open_translator.connect(open_translator)
+    launcher.open_concordance.connect(open_concordance)
+    launcher.open_glossary.connect(open_glossary)
 
     launcher.show()
     sys.exit(app.exec())
