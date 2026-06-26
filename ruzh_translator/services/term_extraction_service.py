@@ -1,0 +1,199 @@
+"""Terminology extraction service.
+
+Extracts candidate terms from Russian and Chinese text using
+language-specific NLP tools.
+"""
+
+import logging
+from collections import Counter
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_ru_terms(text: str, top_n: int = 50) -> list[dict]:
+    """Extract candidate terms from Russian text.
+
+    Uses pymorphy3 for lemmatization and YAKE for keyword scoring.
+    Falls back to simple noun phrase extraction if YAKE is unavailable.
+
+    Args:
+        text: Russian text.
+        top_n: Maximum number of terms to return.
+
+    Returns:
+        List of dicts with 'term', 'score', 'frequency' keys.
+    """
+    terms = []
+
+    # Try YAKE first
+    try:
+        import yake
+        kw_extractor = yake.KeywordExtractor(
+            lan="ru",
+            top=top_n,
+            n=3,  # n-gram size up to 3
+            features=None,
+        )
+        keywords = kw_extractor.extract_keywords(text)
+        for kw, score in keywords:
+            terms.append({
+                "term": kw,
+                "score": round(score, 4),
+                "frequency": text.lower().count(kw.lower()),
+            })
+        return terms
+    except ImportError:
+        logger.debug("yake not installed, using simple extraction")
+
+    # Fallback: extract noun phrases using pymorphy3
+    try:
+        from pymorphy3 import MorphAnalyzer
+        morph = MorphAnalyzer()
+
+        # Split into words, find nouns and adjectives
+        words = text.split()
+        i = 0
+        phrases = []
+        while i < len(words):
+            word = words[i].strip(".,!?;:()[]«»\"'")
+            if not word:
+                i += 1
+                continue
+
+            try:
+                parsed = morph.parse(word)[0]
+                pos = parsed.tag.POS
+            except Exception:
+                i += 1
+                continue
+
+            # Noun phrase: ADJ+NOUN or NOUN+NOUN(gen)
+            if pos == "NOUN" or pos == "ADJF":
+                phrase_parts = [parsed.normal_form]
+                j = i + 1
+                while j < len(words) and j - i < 3:
+                    next_word = words[j].strip(".,!?;:()[]«»\"'")
+                    if not next_word:
+                        j += 1
+                        continue
+                    try:
+                        next_parsed = morph.parse(next_word)[0]
+                        if next_parsed.tag.POS in ("NOUN", "ADJF"):
+                            phrase_parts.append(next_parsed.normal_form)
+                            j += 1
+                        else:
+                            break
+                    except Exception:
+                        break
+                if len(phrase_parts) >= 2:
+                    phrase = " ".join(phrase_parts)
+                    phrases.append(phrase)
+                    i = j
+                    continue
+            i += 1
+
+        # Count and rank
+        counter = Counter(phrases)
+        for phrase, freq in counter.most_common(top_n):
+            if freq >= 2:
+                terms.append({
+                    "term": phrase,
+                    "score": round(1.0 / (1.0 + freq), 4),
+                    "frequency": freq,
+                })
+    except ImportError:
+        logger.debug("pymorphy3 not installed")
+
+    return terms
+
+
+def _extract_zh_terms(text: str, top_n: int = 50) -> list[dict]:
+    """Extract candidate terms from Chinese text using jieba.
+
+    Args:
+        text: Chinese text.
+        top_n: Maximum number of terms to return.
+
+    Returns:
+        List of dicts with 'term', 'score', 'frequency' keys.
+    """
+    terms = []
+
+    # Try YAKE first
+    try:
+        import yake
+        kw_extractor = yake.KeywordExtractor(
+            lan="zh",
+            top=top_n,
+            n=3,
+            features=None,
+        )
+        keywords = kw_extractor.extract_keywords(text)
+        for kw, score in keywords:
+            terms.append({
+                "term": kw,
+                "score": round(score, 4),
+                "frequency": text.count(kw),
+            })
+        return terms
+    except ImportError:
+        pass
+
+    # Fallback: jieba TF-IDF + POS filtering
+    try:
+        import jieba.analyse
+        keywords = jieba.analyse.extract_tags(
+            text,
+            topK=top_n,
+            withWeight=True,
+            allowPOS=("n", "nr", "ns", "nt", "nz", "v", "vn", "a"),
+        )
+        for kw, weight in keywords:
+            terms.append({
+                "term": kw,
+                "score": round(1.0 / (1.0 + weight), 4),
+                "frequency": text.count(kw),
+            })
+    except ImportError:
+        logger.debug("jieba not installed")
+
+    return terms
+
+
+def extract_terms(
+    text: str,
+    language: str = "ru",
+    top_n: int = 50,
+) -> list[dict]:
+    """Extract candidate terms from text.
+
+    Args:
+        text: Input text.
+        language: Language code ('ru' or 'zh-CN').
+        top_n: Maximum number of terms.
+
+    Returns:
+        List of dicts with 'term', 'score', 'frequency'.
+    """
+    if language == "zh-CN":
+        return _extract_zh_terms(text, top_n)
+    return _extract_ru_terms(text, top_n)
+
+
+def extract_terms_from_segments(
+    segments: list,
+    language: str = "ru",
+    top_n: int = 100,
+) -> list[dict]:
+    """Extract candidate terms from a list of segments.
+
+    Args:
+        segments: List of Segment ORM instances.
+        language: Language of the source text.
+        top_n: Maximum number of terms.
+
+    Returns:
+        List of term dicts.
+    """
+    combined_text = " ".join(seg.source_text for seg in segments if seg.source_text)
+    return extract_terms(combined_text, language, top_n)
