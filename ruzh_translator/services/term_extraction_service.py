@@ -197,3 +197,84 @@ def extract_terms_from_segments(
     """
     combined_text = " ".join(seg.source_text for seg in segments if seg.source_text)
     return extract_terms(combined_text, language, top_n)
+
+
+def translate_terms_with_ai(
+    terms: list[str],
+    source_lang: str = "ru",
+    target_lang: str = "zh-CN",
+) -> dict[str, str]:
+    """Use AI API to translate extracted terms.
+
+    Requires AI settings to be configured in preferences.
+
+    Args:
+        terms: List of source terms to translate.
+        source_lang: Source language code.
+        target_lang: Target language code.
+
+    Returns:
+        Dict mapping source_term → ai_translated_term.
+        If AI is not configured or fails, returns empty dict.
+    """
+    from ruzh_translator.ui.settings_dialog import get_ai_config
+
+    config = get_ai_config()
+    if not config["enabled"] or not config["key"]:
+        return {}
+
+    if not terms:
+        return {}
+
+    lang_names = {"ru": "俄语", "zh-CN": "中文"}
+    src_name = lang_names.get(source_lang, source_lang)
+    tgt_name = lang_names.get(target_lang, target_lang)
+
+    prompt = (
+        f"请将以下{src_name}术语翻译为{tgt_name}。"
+        f"对于每个术语，给出最准确的翻译。"
+        f"格式: 源术语 -> 目标翻译\n\n"
+        + "\n".join(terms[:30])  # Limit to 30 terms per call
+    )
+
+    try:
+        import urllib.request
+        import json
+
+        req = urllib.request.Request(
+            f"{config['url'].rstrip('/')}/chat/completions",
+            data=json.dumps({
+                "model": config["model"],
+                "messages": [
+                    {"role": "system", "content": "你是一个专业的俄汉翻译助手，擅长术语翻译。"},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 2000,
+            }).encode(),
+            headers={
+                "Authorization": f"Bearer {config['key']}",
+                "Content-Type": "application/json",
+            },
+        )
+
+        resp = urllib.request.urlopen(req, timeout=30)
+        data = json.loads(resp.read())
+        content = data["choices"][0]["message"]["content"]
+
+        # Parse response: "term -> translation"
+        results = {}
+        for line in content.strip().split("\n"):
+            if "->" in line or "→" in line:
+                sep = "->" if "->" in line else "→"
+                parts = line.split(sep, 1)
+                if len(parts) == 2:
+                    src = parts[0].strip()
+                    tgt = parts[1].strip()
+                    results[src] = tgt
+
+        return results
+
+    except Exception as e:
+        logger.warning(f"AI term translation failed: {e}")
+        return {}

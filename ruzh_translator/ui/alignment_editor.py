@@ -297,9 +297,49 @@ class AlignmentEditor(QWidget):
         if not pid:
             return
 
-        # Try reading from Documents
+        # Try loading Segments first (from import or wizard)
+        from ruzh_translator.models.segment import Segment
+        segments = (
+            self._session.query(Segment)
+            .filter(Segment.project_id == pid)
+            .order_by(Segment.paragraph_index, Segment.segment_index)
+            .all()
+        )
+
+        if segments:
+            # Separate source and target segments by language detection
+            src_sents = []
+            tgt_sents = []
+            for seg in segments:
+                text = (seg.source_text or "").strip()
+                if not text:
+                    continue
+                # Detect language: Cyrillic = Russian, CJK = Chinese
+                has_cyrillic = any(0x0400 <= ord(c) <= 0x04FF for c in text[:50])
+                has_cjk = any(0x4E00 <= ord(c) <= 0x9FFF for c in text[:50])
+                if has_cyrillic and not has_cjk:
+                    src_sents.append(text)
+                elif has_cjk and not has_cyrillic:
+                    tgt_sents.append(text)
+                elif seg.target_text and seg.target_text.strip():
+                    # Has a translation — could be either
+                    src_sents.append(text)
+                    tgt_sents.append(seg.target_text.strip())
+                else:
+                    src_sents.append(text)
+
+            self._src_sentences = src_sents
+            self._tgt_sentences = tgt_sents
+            self._populate_lists()
+            self._status_label.setText(
+                f"已加载 {len(src_sents)} 个源语句子 | {len(tgt_sents)} 个目标语句子"
+                if tgt_sents else
+                f"已加载 {len(src_sents)} 个源语句子 — 请导入目标语文件"
+            )
+
+        # Also try Documents
         docs = get_documents(self._session, pid)
-        if len(docs) >= 2:
+        if len(docs) >= 2 and not self._src_sentences:
             # Use raw document content for display
             for doc in docs:
                 sentences = doc.raw_content.replace('\r\n', '\n').split('\n')
@@ -338,6 +378,13 @@ class AlignmentEditor(QWidget):
                 f"已加载 {len(self._pairs_data)} 个对齐对 | "
                 f"源语 {len(self._src_sentences)} 句 | 目标语 {len(self._tgt_sentences)} 句"
             )
+
+        # Empty state: no data loaded
+        if not self._src_sentences and not self._tgt_sentences:
+            self._status_label.setText(
+                "📂 项目暂无数据。请点击上方按钮导入源语和目标语文件，然后点击「开始对齐」。"
+            )
+            self._status_label.setStyleSheet("color: #F44336; padding: 8px; font-weight: bold;")
 
     def _find_index(self, lst, text):
         """Find text in list, return index."""
