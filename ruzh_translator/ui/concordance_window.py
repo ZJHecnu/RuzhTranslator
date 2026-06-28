@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QLabel, QListWidget, QListWidgetItem,
     QTextEdit, QFileDialog, QMessageBox, QGroupBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QComboBox, QTabWidget,
-    QDialog, QDialogButtonBox,
+    QDialog, QDialogButtonBox, QSpinBox,
 )
 from PySide6.QtCore import Qt
 
@@ -13,7 +13,7 @@ from ruzh_translator.models.base import get_session
 from ruzh_translator.models.tm import TranslationMemoryEntry
 from ruzh_translator.services.tm_service import concordance_search, add_tm_entry
 from ruzh_translator.models.segment import AlignmentPair
-from ruzh_translator.services.project_service import list_projects
+from ruzh_translator.services.project_service import list_projects, create_project
 
 
 class ConcordanceWindow(QMainWindow):
@@ -40,10 +40,10 @@ class ConcordanceWindow(QMainWindow):
 
         self._proj_combo = QComboBox()
         self._proj_combo.addItem("从项目加载语料...", None)
-        for p in list_projects(self._session):
-            self._proj_combo.addItem(f"📋 {p.name}", p.id)
+        self._refresh_proj_combo()
         self._proj_combo.currentIndexChanged.connect(self._on_load_project)
         tools.addWidget(self._proj_combo, 1)
+        tools.addWidget(QPushButton("＋新建", clicked=self._on_new_project))
 
         tools.addWidget(QPushButton("📂 TMX", clicked=self._on_import_tmx))
         tools.addWidget(QPushButton("📂 XLSX", clicked=self._on_import_xlsx))
@@ -103,26 +103,35 @@ class ConcordanceWindow(QMainWindow):
         self._search_edit.setPlaceholderText("输入关键词检索上下文 (KWIC)...")
         self._search_edit.returnPressed.connect(self._on_search)
         bar.addWidget(self._search_edit, 1)
-        bar.addWidget(QPushButton("🔍 检索", clicked=self._on_search))
 
+        bar.addWidget(QLabel("上下文:"))
+        self._span_spin = QSpinBox()
+        self._span_spin.setRange(3, 25)
+        self._span_spin.setValue(8)
+        self._span_spin.setSuffix(" 词")
+        self._span_spin.setToolTip("左右上下文字符长度")
+        bar.addWidget(self._span_spin)
+
+        bar.addWidget(QPushButton("🔍 检索", clicked=self._on_search))
         self._tag_combo = QComboBox()
         self._tag_combo.setEditable(True)
         self._tag_combo.setPlaceholderText("选择或输入标签...")
         self._tag_combo.setMinimumWidth(100)
         bar.addWidget(self._tag_combo)
         bar.addWidget(QPushButton("🏷️ 标签管理", clicked=self._on_manage_tags))
-        bar.addWidget(QPushButton("📤 导出KWIC", clicked=self._on_export))
-        bar.addWidget(QPushButton("📈 查看统计", clicked=lambda: self._tab_widget().setCurrentIndex(2)))
+        bar.addWidget(QPushButton("📤 导出", clicked=self._on_export))
+        bar.addWidget(QPushButton("📈 统计", clicked=lambda: self._tab_widget().setCurrentIndex(2)))
         layout.addLayout(bar)
 
-        # KWIC table
+        # KWIC table — bilingual
         self._kwic_table = QTableWidget()
-        self._kwic_table.setColumnCount(5)
-        self._kwic_table.setHorizontalHeaderLabels(["#", "左上下文", "关键词", "右上下文", "标签"])
+        self._kwic_table.setColumnCount(6)
+        self._kwic_table.setHorizontalHeaderLabels(["#", "源语KWIC", "关键词", "目标语译文", "标签", ""])
         self._kwic_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self._kwic_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self._kwic_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
         self._kwic_table.setColumnWidth(4, 110)
+        self._kwic_table.setColumnHidden(5, True)  # hidden: store full data index
         self._kwic_table.setAlternatingRowColors(True)
         self._kwic_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._kwic_table.cellDoubleClicked.connect(self._on_kwic_click)
@@ -159,26 +168,30 @@ class ConcordanceWindow(QMainWindow):
         return w
 
     def _refresh_stats(self):
-        """Show tagging statistics."""
-        if not self._kwic_tags:
-            self._stats_view.setPlainText("暂无标注数据。请先在「KWIC检索与标注」中检索并标注。")
+        """Read tags directly from QComboBox widgets and show statistics."""
+        total = self._kwic_table.rowCount()
+        if total == 0:
+            self._stats_view.setPlainText("暂无检索数据。请先在「KWIC检索与标注」中检索。")
             return
 
         from collections import Counter
-        tags = [t for t in self._kwic_tags.values() if t]
-        counter = Counter(tags)
-        total = len(self._kwic_tags)
-        tagged = len(tags)
+        tags = []
+        for r in range(total):
+            w = self._kwic_table.cellWidget(r, 4)
+            if isinstance(w, QComboBox):
+                t = w.currentText().strip()
+                if t: tags.append(t)
 
-        lines = [
-            f"=== 标注统计 ===\n",
-            f"总索引行: {total}",
-            f"已标注:   {tagged} ({tagged/total*100:.1f}%)" if total else "已标注: 0",
-            f"未标注:   {total - tagged}\n",
-            f"--- 标签分布 ---",
-        ]
+        tagged = len(tags)
+        counter = Counter(tags)
+
+        lines = [f"=== 标注统计 ===\n",
+                 f"总索引行: {total}",
+                 f"已标注:   {tagged} ({tagged/total*100:.1f}%)" if total else "已标注: 0",
+                 f"未标注:   {total - tagged}\n",
+                 f"--- 标签分布 ---"]
         for tag, count in counter.most_common():
-            bar = "█" * (count * 30 // max(counter.values(), 1))
+            bar = "█" * min(count * 30 // max(counter.values(), 1), 30)
             lines.append(f"  {tag:15s} {count:4d}  {bar}")
 
         self._stats_view.setPlainText("\n".join(lines))
@@ -214,34 +227,37 @@ class ConcordanceWindow(QMainWindow):
         query = self._search_edit.text().strip()
         if not query: return
         results = concordance_search(self._session, query, limit=200)
+        span = self._span_spin.value()
         self._kwic_table.setRowCount(len(results))
-        self._kwic_tags = {}
+        self._kwic_data = results  # store for stats
         from PySide6.QtGui import QFont, QColor
 
         for i, r in enumerate(results):
             self._kwic_table.setItem(i, 0, QTableWidgetItem(str(i+1)))
-            src = r["source_text"]
+            src = r["source_text"]; tgt = r.get("target_text", "")
             idx = src.lower().find(query.lower())
-            left = src[max(0, idx-30):idx] if idx >= 0 else src[:30]
-            right = src[idx+len(query):idx+len(query)+30] if idx >= 0 else ""
+            left = src[max(0, idx-span):idx] if idx >= 0 else src[:span]
+            right = src[idx+len(query):idx+len(query)+span] if idx >= 0 else ""
             keyword = src[idx:idx+len(query)] if idx >= 0 else query
-            self._kwic_table.setItem(i, 1, QTableWidgetItem(f"...{left}"))
+            # Bilingual KWIC: source context on left, target on right
+            self._kwic_table.setItem(i, 1, QTableWidgetItem(f"...{left} {keyword} {right}..."))
             kw = QTableWidgetItem(keyword)
-            kw.setForeground(QColor("#FF0000"))
-            f = QFont(); f.setBold(True); kw.setFont(f)
+            kw.setForeground(QColor("#FF0000")); f = QFont(); f.setBold(True); kw.setFont(f)
             self._kwic_table.setItem(i, 2, kw)
-            self._kwic_table.setItem(i, 3, QTableWidgetItem(f"{right}..."))
+            self._kwic_table.setItem(i, 3, QTableWidgetItem(tgt[:120]))
             # Tag dropdown
             cb = QComboBox(); cb.addItem("")
             cb.addItems(self._get_tag_list())
             self._kwic_table.setCellWidget(i, 4, cb)
-            self._kwic_table.item(i, 0).setData(Qt.UserRole, r)
+            # Hidden column stores full data
+            self._kwic_table.setItem(i, 5, QTableWidgetItem(""))
+            self._kwic_table.item(i, 5).setData(Qt.UserRole, r)
 
     def _get_tag_list(self):
         return [self._tag_combo.itemText(j) for j in range(self._tag_combo.count()) if self._tag_combo.itemText(j)]
 
     def _on_kwic_click(self, row, _):
-        item = self._kwic_table.item(row, 0)
+        item = self._kwic_table.item(row, 5)  # Hidden column stores data
         if item:
             r = item.data(Qt.UserRole)
             if isinstance(r, dict):
@@ -269,6 +285,21 @@ class ConcordanceWindow(QMainWindow):
                     cur = w.currentText(); w.blockSignals(True)
                     w.clear(); w.addItem(""); w.addItems(tags)
                     w.setCurrentText(cur); w.blockSignals(False)
+
+    def _refresh_proj_combo(self):
+        self._proj_combo.blockSignals(True)
+        self._proj_combo.clear()
+        self._proj_combo.addItem("从项目加载语料...", None)
+        for p in list_projects(self._session):
+            self._proj_combo.addItem(f"📋 {p.name}", p.id)
+        self._proj_combo.blockSignals(False)
+
+    def _on_new_project(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "新建项目", "项目名称:")
+        if ok and name.strip():
+            create_project(self._session, name.strip())
+            self._refresh_proj_combo()
 
     # ── Import ───────────────────────────────────────────────
 

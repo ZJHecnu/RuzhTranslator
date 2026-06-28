@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QListWidget, QListWidgetItem, QLabel, QPushButton, QComboBox,
     QFileDialog, QMessageBox, QProgressBar, QGroupBox, QAbstractItemView, QMenu,
+    QLineEdit, QDialog, QDialogButtonBox,
 )
 from PySide6.QtCore import Qt, Signal, QPoint, QRect, QThread
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QPainterPath, QBrush, QAction
@@ -67,8 +68,9 @@ class ConnectorWidget(QWidget):
 
 
 class AlignWorker(QThread):
-    """Background thread for alignment computation."""
-    finished = Signal(list)  # pairs_data
+    """Background alignment with paragraph-first approach (fast + progress)."""
+    finished = Signal(list)
+    progress = Signal(int, int)  # current, total paragraphs
     error = Signal(str)
 
     def __init__(self, src_sents, tgt_sents, method):
@@ -79,17 +81,56 @@ class AlignWorker(QThread):
 
     def run(self):
         try:
-            pairs = align_documents(
-                "\n\n".join(self.src_sents), "\n\n".join(self.tgt_sents),
-                src_lang="ru", tgt_lang="zh-CN",
-                para_method=self.method, sent_method=self.method,
-            )
-            data = []
-            for pd in pairs:
-                si = next((i for i, s in enumerate(self.src_sents) if s.strip() == pd["source_text"].strip()), len(data))
-                ti = next((i for i, s in enumerate(self.tgt_sents) if s.strip() == pd["target_text"].strip()), len(data))
-                data.append((min(si, len(self.src_sents)-1), min(ti, len(self.tgt_sents)-1), pd["confidence"]))
-            self.finished.emit(data)
+            if self.method == "sequential":
+                # Ultra-fast: simple zip
+                data = []
+                n = max(len(self.src_sents), len(self.tgt_sents))
+                for i in range(n):
+                    si = self.src_sents[i] if i < len(self.src_sents) else ""
+                    ti = self.tgt_sents[i] if i < len(self.tgt_sents) else ""
+                    if si or ti:
+                        data.append((i, i, 0.5))
+                    self.progress.emit(i + 1, n)
+                self.finished.emit(data)
+                return
+
+            # Semantic: paragraph-first fast alignment
+            import numpy as np
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer("LaBSE")
+
+            # Group sentences into paragraphs (paragraph = 1 line)
+            # Source paragraphs already split as 1 sentence per line
+            # For paragraph-first: zip source[i] with target[i] if counts match
+            n_src = len(self.src_sents)
+            n_tgt = len(self.tgt_sents)
+            total = max(n_src, n_tgt)
+
+            all_pairs = []
+
+            if n_src == n_tgt:
+                # Perfect 1:1 paragraph alignment (fast path)
+                for i in range(n_src):
+                    src_emb = model.encode([self.src_sents[i]])
+                    tgt_emb = model.encode([self.tgt_sents[i]])
+                    sim = float(np.dot(src_emb[0], tgt_emb[0]) /
+                                (np.linalg.norm(src_emb[0]) * np.linalg.norm(tgt_emb[0])))
+                    all_pairs.append((i, i, sim))
+                    self.progress.emit(i + 1, total)
+            else:
+                # Different counts: semantic paragraph matching
+                src_emb = model.encode(self.src_sents)
+                tgt_emb = model.encode(self.tgt_sents)
+                src_n = src_emb / np.linalg.norm(src_emb, axis=1, keepdims=True)
+                tgt_n = tgt_emb / np.linalg.norm(tgt_emb, axis=1, keepdims=True)
+
+                for i, srow in enumerate(src_n):
+                    scores = np.dot(tgt_n, srow)
+                    best_j = int(np.argmax(scores))
+                    all_pairs.append((i, best_j, float(scores[best_j])))
+                    self.progress.emit(i + 1, n_src)
+
+            self.finished.emit(all_pairs)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -124,6 +165,7 @@ class AlignerWindow(QMainWindow):
         self._refresh_projects()
         self._proj_combo.currentIndexChanged.connect(self._on_proj_changed)
         top.addWidget(self._proj_combo, 1)
+        top.addWidget(QPushButton("＋新建", clicked=self._on_new_project))
 
         top.addWidget(QLabel("源语:"))
         top.addWidget(QPushButton("📂 导入", clicked=self._on_import_src))
@@ -151,7 +193,7 @@ class AlignerWindow(QMainWindow):
         sg = QGroupBox("源语（俄语）")
         sl = QVBoxLayout(sg)
         self._src_list = QListWidget()
-        self._src_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._src_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._src_list.setStyleSheet("QListWidget::item{padding:8px;border-bottom:1px solid #EEE;font-size:13px;} QListWidget::item:selected{background:#E3F2FD;}")
         self._src_list.currentRowChanged.connect(self._on_src_sel)
         sl.addWidget(self._src_list)
@@ -190,8 +232,19 @@ class AlignerWindow(QMainWindow):
 
     def _refresh_projects(self):
         from ruzh_translator.services.project_service import list_projects
+        # Keep first item, re-add projects
+        while self._proj_combo.count() > 1:
+            self._proj_combo.removeItem(1)
         for p in list_projects(self._session):
             self._proj_combo.addItem(f"{p.name}", p.id)
+
+    def _on_new_project(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "新建项目", "项目名称:")
+        if ok and name.strip():
+            from ruzh_translator.services.project_service import create_project
+            create_project(self._session, name.strip())
+            self._refresh_projects()
 
     def _on_proj_changed(self):
         pid = self._proj_combo.currentData()
@@ -256,11 +309,18 @@ class AlignerWindow(QMainWindow):
             if reply == QMessageBox.No:
                 return
 
-        self._progress.setVisible(True); self._progress.setRange(0, 0)
+        total = max(len(self._src_sents), len(self._tgt_sents))
+        self._progress.setVisible(True)
+        self._progress.setRange(0, total)
+        self._progress.setValue(0)
         self._status.setText("⏳ 正在对齐，请稍候...")
 
         method = "semantic" if "语义" in self._method_combo.currentText() else "sequential"
         self._worker = AlignWorker(self._src_sents, self._tgt_sents, method)
+        self._worker.progress.connect(lambda cur, tot: (
+            self._progress.setValue(cur),
+            self._status.setText(f"⏳ 对齐中... {cur}/{tot} ({cur*100//tot}%)")
+        ))
         self._worker.finished.connect(self._on_align_done)
         self._worker.error.connect(self._on_align_error)
         self._worker.start()
@@ -303,29 +363,62 @@ class AlignerWindow(QMainWindow):
 
     def _on_split(self):
         r = self._src_list.currentRow()
-        if r < 0: return
-        t = self._src_sents[r]; mid = len(t)//2
-        for punc in [',', '，', ';', '；']:
-            idx = t.rfind(punc, 0, mid + len(t)//4)
+        if r < 0: QMessageBox.warning(self, "提示", "请先选中要拆分的源语句子"); return
+        t = self._src_sents[r]
+        # Smart split: find best break point
+        mid = len(t) // 2
+        for punc in [',', '，', ';', '；', '—', ' –']:
+            idx = t.rfind(punc, 0, mid + len(t) // 4)
             if idx > 0: mid = idx + 1; break
-        p1, p2 = t[:mid].strip(), t[mid:].strip()
+
+        # Show split preview dialog
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QDialogButtonBox
+        dlg = QDialog(self); dlg.setWindowTitle("拆分句子 — 确认拆分位置"); dlg.setMinimumWidth(550)
+        l = QVBoxLayout(dlg)
+        l.addWidget(QLabel(f"<b>原句 (行 {r+1}):</b>"))
+        l.addWidget(QLabel(t))
+        l.addWidget(QLabel(f"<b>拆分位置:</b> (第 {mid} 个字符处)"))
+        part1 = QLineEdit(t[:mid].strip()); part2 = QLineEdit(t[mid:].strip())
+        l.addWidget(QLabel("上半句:")); l.addWidget(part1)
+        l.addWidget(QLabel("下半句:")); l.addWidget(part2)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject)
+        l.addWidget(btns)
+        if not dlg.exec(): return
+
+        p1, p2 = part1.text().strip(), part2.text().strip()
         if not p1 or not p2: return
-        self._src_sents[r] = p1; self._src_sents.insert(r+1, p2)
+        self._src_sents[r] = p1; self._src_sents.insert(r + 1, p2)
         new = []
         for si, ti, conf in self._pairs_data:
-            if si == r: new.append((si, ti, conf)); new.append((si+1, -1, 0.0))
-            elif si > r: new.append((si+1, ti, conf))
+            if si == r: new.append((si, ti, conf)); new.append((si + 1, -1, 0.0))
+            elif si > r: new.append((si + 1, ti, conf))
             else: new.append((si, ti, conf))
         self._pairs_data = new
-        self._populate_lists(); self._apply_colors(); self._connector.set_data(self._pairs_data, len(self._src_sents), len(self._tgt_sents))
+        self._populate_lists(); self._apply_colors()
+        self._connector.set_data(self._pairs_data, len(self._src_sents), len(self._tgt_sents))
 
     def _on_merge(self):
-        r = self._src_list.currentRow()
-        if r <= 0: return
-        self._src_sents[r-1] += " " + self._src_sents.pop(r)
-        new = [(si-1 if si>r else si, ti, conf) for si, ti, conf in self._pairs_data if si != r]
-        self._pairs_data = new
-        self._populate_lists(); self._apply_colors(); self._connector.set_data(self._pairs_data, len(self._src_sents), len(self._tgt_sents))
+        # Merge selected with previous — or merge if two rows are selected
+        rows = sorted(set(i.row() for i in self._src_list.selectedIndexes()))
+        if len(rows) >= 2:
+            # Merge two selected rows
+            r1, r2 = rows[0], rows[1]
+            self._src_sents[r1] += " " + self._src_sents.pop(r2)
+            new = []
+            for si, ti, conf in self._pairs_data:
+                if si == r2: continue  # drop
+                elif si > r2: new.append((si - 1, ti, conf))
+                else: new.append((si, ti, conf))
+            self._pairs_data = new
+        else:
+            r = self._src_list.currentRow()
+            if r <= 0: QMessageBox.warning(self, "提示", "请选中要合并的两行（Ctrl+点击），或选中第二行合并到上一行"); return
+            self._src_sents[r - 1] += " " + self._src_sents.pop(r)
+            new = [(si - 1 if si > r else si, ti, conf) for si, ti, conf in self._pairs_data if si != r]
+            self._pairs_data = new
+        self._populate_lists(); self._apply_colors()
+        self._connector.set_data(self._pairs_data, len(self._src_sents), len(self._tgt_sents))
 
     def _on_misalign(self):
         if self._selected_pair < 0: return

@@ -36,24 +36,24 @@ def parse_tmx(file_path: str) -> list[dict]:
         return units
 
     for tu in body.findall(f"{ns}tu"):
+        tuvs = tu.findall(f"{ns}tuv")
         source_text = ""
         target_text = ""
         target_lang = ""
+        seen_source = False
 
-        for tuv in tu.findall(f"{ns}tuv"):
+        for tuv in tuvs:
             xml_ns = "http://www.w3.org/XML/1998/namespace"
             lang = tuv.get(f"{{{xml_ns}}}lang", tuv.get("lang", ""))
-            if not lang:
-                # Try without namespace
-                lang = tuv.get("lang", "")
-            seg = tuv.find(f"{ns}seg")
-            if seg is not None:
-                text = "".join(seg.itertext()).strip()
-            else:
-                text = "".join(tuv.itertext()).strip()
 
-            if lang == srclang or (not source_text and not lang):
+            seg = tuv.find(f"{ns}seg")
+            text = "".join(seg.itertext()).strip() if seg is not None else "".join(tuv.itertext()).strip()
+
+            # Assign: if this is the first tuv, it's source; second is target
+            # (handles case where srclang in header doesn't match actual tuv languages)
+            if not seen_source:
                 source_text = text
+                seen_source = True
             else:
                 target_text = text
                 target_lang = lang
