@@ -85,11 +85,14 @@ class TranslatorWindow(QMainWindow):
         tl.addWidget(self._status_lbl)
         split.addWidget(tg)
 
-        # P4: TM matches
+        # P4: TM matches (fixed width, scrollable)
         tmg = QGroupBox("📖 TM 匹配")
+        tmg.setMaximumWidth(280)
         tml = QVBoxLayout(tmg)
         self._tm_list = QListWidget()
-        self._tm_list.setStyleSheet("QListWidget::item{padding:8px;border-bottom:1px solid #EEE;} QListWidget::item:hover{background:#E8F5E9;}")
+        self._tm_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._tm_list.setWordWrap(True)
+        self._tm_list.setStyleSheet("QListWidget::item{padding:6px;border-bottom:1px solid #EEE;} QListWidget::item:hover{background:#E8F5E9;}")
         self._tm_list.itemDoubleClicked.connect(self._on_tm_insert)
         tml.addWidget(self._tm_list)
         self._tm_info = QLabel(""); self._tm_info.setStyleSheet("color:#9E9E9E;font-size:11px;")
@@ -97,6 +100,8 @@ class TranslatorWindow(QMainWindow):
         split.addWidget(tmg)
 
         split.setSizes([220, 420, 420, 220])
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 1); split.setStretchFactor(3, 0)
         layout.addWidget(split, 1)
 
         # Bottom: term hints + actions
@@ -207,10 +212,13 @@ class TranslatorWindow(QMainWindow):
         try:
             results = fuzzy_match(self._session, src, threshold=0.55, limit=8)
             for r in results:
-                pct = int(r["score"]*100); bar = "█"*(pct//10)+"░"*(10-pct//10)
-                item = QListWidgetItem(f"{bar} {pct}%\n{r['entry'].target_text[:80]}")
-                item.setData(Qt.UserRole, r["entry"].target_text); self._tm_list.addItem(item)
-            self._tm_info.setText(f"找到 {len(results)} 条匹配" if results else "未找到匹配")
+                pct = int(r["score"]*100)
+                bar = "█"*(pct//10)+"░"*(10-pct//10)
+                tgt_text = r['entry'].target_text[:50]
+                item = QListWidgetItem(f"{bar} {pct}%\n{tgt_text}")
+                item.setData(Qt.UserRole, r["entry"].target_text)
+                self._tm_list.addItem(item)
+            self._tm_info.setText(f"匹配 {len(results)} 条" if results else "无匹配")
         except: pass
 
     def _on_tm_insert(self, item):

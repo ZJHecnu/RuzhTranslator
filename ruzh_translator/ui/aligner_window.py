@@ -68,67 +68,58 @@ class ConnectorWidget(QWidget):
 
 
 class AlignWorker(QThread):
-    """Background alignment with paragraph-first approach (fast + progress)."""
+    """Paragraph-by-paragraph alignment — fast + shows real progress."""
     finished = Signal(list)
-    progress = Signal(int, int)  # current, total paragraphs
+    progress = Signal(int, int)
     error = Signal(str)
 
-    def __init__(self, src_sents, tgt_sents, method):
+    def __init__(self, src_paras, tgt_paras):
         super().__init__()
-        self.src_sents = src_sents
-        self.tgt_sents = tgt_sents
-        self.method = method
+        self.src_paras = src_paras  # list of paragraph texts
+        self.tgt_paras = tgt_paras
 
     def run(self):
         try:
-            if self.method == "sequential":
-                # Ultra-fast: simple zip
-                data = []
-                n = max(len(self.src_sents), len(self.tgt_sents))
-                for i in range(n):
-                    si = self.src_sents[i] if i < len(self.src_sents) else ""
-                    ti = self.tgt_sents[i] if i < len(self.tgt_sents) else ""
-                    if si or ti:
-                        data.append((i, i, 0.5))
-                    self.progress.emit(i + 1, n)
-                self.finished.emit(data)
-                return
-
-            # Semantic: paragraph-first fast alignment
             import numpy as np
             from sentence_transformers import SentenceTransformer
             model = SentenceTransformer("LaBSE")
 
-            # Group sentences into paragraphs (paragraph = 1 line)
-            # Source paragraphs already split as 1 sentence per line
-            # For paragraph-first: zip source[i] with target[i] if counts match
-            n_src = len(self.src_sents)
-            n_tgt = len(self.tgt_sents)
-            total = max(n_src, n_tgt)
-
             all_pairs = []
+            pair_idx = 0
+            total = max(len(self.src_paras), len(self.tgt_paras))
 
-            if n_src == n_tgt:
-                # Perfect 1:1 paragraph alignment (fast path)
-                for i in range(n_src):
-                    src_emb = model.encode([self.src_sents[i]])
-                    tgt_emb = model.encode([self.tgt_sents[i]])
-                    sim = float(np.dot(src_emb[0], tgt_emb[0]) /
-                                (np.linalg.norm(src_emb[0]) * np.linalg.norm(tgt_emb[0])))
-                    all_pairs.append((i, i, sim))
-                    self.progress.emit(i + 1, total)
-            else:
-                # Different counts: semantic paragraph matching
-                src_emb = model.encode(self.src_sents)
-                tgt_emb = model.encode(self.tgt_sents)
+            for pi in range(total):
+                src_para = self.src_paras[pi] if pi < len(self.src_paras) else ""
+                tgt_para = self.tgt_paras[pi] if pi < len(self.tgt_paras) else ""
+
+                # Split into sentences within each paragraph
+                src_sents = split_sentences(src_para, "ru")
+                tgt_sents = split_sentences(tgt_para, "zh-CN")
+
+                if not src_sents or not tgt_sents:
+                    self.progress.emit(pi + 1, total)
+                    continue
+
+                # Encode and match within this paragraph (fast!)
+                src_emb = model.encode(src_sents, show_progress_bar=False)
+                tgt_emb = model.encode(tgt_sents, show_progress_bar=False)
                 src_n = src_emb / np.linalg.norm(src_emb, axis=1, keepdims=True)
                 tgt_n = tgt_emb / np.linalg.norm(tgt_emb, axis=1, keepdims=True)
 
-                for i, srow in enumerate(src_n):
-                    scores = np.dot(tgt_n, srow)
-                    best_j = int(np.argmax(scores))
-                    all_pairs.append((i, best_j, float(scores[best_j])))
-                    self.progress.emit(i + 1, n_src)
+                # Greedy matching (same as user's reference code)
+                if len(src_sents) >= len(tgt_sents):
+                    for si, srow in enumerate(src_n):
+                        scores = np.dot(tgt_n, srow)
+                        best_ti = int(np.argmax(scores))
+                        all_pairs.append((pair_idx + si, pair_idx + best_ti, float(scores[best_ti])))
+                else:
+                    for ti, trow in enumerate(tgt_n):
+                        scores = np.dot(src_n, trow)
+                        best_si = int(np.argmax(scores))
+                        all_pairs.append((pair_idx + best_si, pair_idx + ti, float(scores[best_si])))
+
+                pair_idx += max(len(src_sents), len(tgt_sents))
+                self.progress.emit(pi + 1, total)
 
             self.finished.emit(all_pairs)
         except Exception as e:
@@ -267,25 +258,32 @@ class AlignerWindow(QMainWindow):
 
     def _on_import_src(self):
         path, _ = QFileDialog.getOpenFileName(self, "导入源语文件", "", ";;".join(f"{d} (*{e})" for e, d in IMPORT_FORMATS.items()))
-        if path:
-            data = import_file(path)
-            sents = [];
-            for para in data["paragraphs"]:
-                sents.extend(split_sentences(para, data["language"]))
-            self._src_sents = [s.strip() for s in sents if s.strip()]
-            self._populate_lists()
-            self._status.setText(f"源语: {len(self._src_sents)} 句 — 请导入目标语文件")
+        if not path: return
+        data = import_file(path)
+        self._src_paras = data["paragraphs"]  # Keep paragraphs for alignment
+        # Also flatten for display
+        self._src_sents = []
+        for para in self._src_paras:
+            self._src_sents.extend(split_sentences(para, data["language"]))
+        self._src_sents = [s.strip() for s in self._src_sents if s.strip()]
+        self._populate_lists()
+        self._status.setText(f"源语: {len(self._src_sents)} 句 ({len(self._src_paras)} 段) — 请导入目标语文件")
+        if self._tgt_sents:
+            self._on_align()  # Auto-align if both files loaded
 
     def _on_import_tgt(self):
         path, _ = QFileDialog.getOpenFileName(self, "导入目标语文件", "", ";;".join(f"{d} (*{e})" for e, d in IMPORT_FORMATS.items()))
-        if path:
-            data = import_file(path)
-            sents = [];
-            for para in data["paragraphs"]:
-                sents.extend(split_sentences(para, "zh-CN"))
-            self._tgt_sents = [s.strip() for s in sents if s.strip()]
-            self._populate_lists()
-            self._status.setText(f"源语: {len(self._src_sents)} 句 | 目标语: {len(self._tgt_sents)} 句 — 请点击「对齐」")
+        if not path: return
+        data = import_file(path)
+        self._tgt_paras = data["paragraphs"]
+        self._tgt_sents = []
+        for para in self._tgt_paras:
+            self._tgt_sents.extend(split_sentences(para, "zh-CN"))
+        self._tgt_sents = [s.strip() for s in self._tgt_sents if s.strip()]
+        self._populate_lists()
+        self._status.setText(f"源语: {len(self._src_sents)} 句 | 目标语: {len(self._tgt_sents)} 句 — 自动对齐中...")
+        if self._src_sents:
+            self._on_align()  # Auto-align
 
     def _populate_lists(self):
         self._src_list.clear(); self._tgt_list.clear()
@@ -296,30 +294,20 @@ class AlignerWindow(QMainWindow):
         if not self._src_sents or not self._tgt_sents:
             QMessageBox.warning(self, "提示", "请先导入源语和目标语文件"); return
 
-        # Warn if large files
-        total = len(self._src_sents) + len(self._tgt_sents)
-        if total > 500:
-            reply = QMessageBox.question(self, "大文件警告",
-                f"共有 {total} 个句子，语义对齐可能需要较长时间。\n\n"
-                f"建议：\n"
-                f"• 选择「顺序」对齐模式获得更快速度\n"
-                f"• 或拆分文件为较小段落\n\n"
-                f"是否继续语义对齐？",
-                QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.No:
-                return
+        # Use paragraphs if available, otherwise wrap sentences as single paragraphs
+        src_paras = getattr(self, '_src_paras', None) or self._src_sents
+        tgt_paras = getattr(self, '_tgt_paras', None) or self._tgt_sents
 
-        total = max(len(self._src_sents), len(self._tgt_sents))
+        total = max(len(src_paras), len(tgt_paras))
         self._progress.setVisible(True)
         self._progress.setRange(0, total)
         self._progress.setValue(0)
-        self._status.setText("⏳ 正在对齐，请稍候...")
+        self._status.setText(f"⏳ 对齐中... 0/{total} 段")
 
-        method = "semantic" if "语义" in self._method_combo.currentText() else "sequential"
-        self._worker = AlignWorker(self._src_sents, self._tgt_sents, method)
+        self._worker = AlignWorker(src_paras, tgt_paras)
         self._worker.progress.connect(lambda cur, tot: (
             self._progress.setValue(cur),
-            self._status.setText(f"⏳ 对齐中... {cur}/{tot} ({cur*100//tot}%)")
+            self._status.setText(f"⏳ 对齐中... {cur}/{tot} 段 ({cur*100//tot}%)")
         ))
         self._worker.finished.connect(self._on_align_done)
         self._worker.error.connect(self._on_align_error)
@@ -342,16 +330,34 @@ class AlignerWindow(QMainWindow):
         QMessageBox.critical(self, "对齐失败", msg)
 
     def _apply_colors(self):
+        # Reset all items first
+        for i in range(self._src_list.count()):
+            item = self._src_list.item(i)
+            item.setBackground(QColor("#FFFFFF"))
+            item.setForeground(QColor("#212121"))
+        for i in range(self._tgt_list.count()):
+            item = self._tgt_list.item(i)
+            item.setBackground(QColor("#FFFFFF"))
+            item.setForeground(QColor("#212121"))
+
+        # Color only aligned pairs
         aligned_src = set(); aligned_tgt = set()
         for si, ti, conf in self._pairs_data:
             aligned_src.add(si); aligned_tgt.add(ti)
             c = QColor("#C8E6C9" if conf > 0.8 else "#FFE0B2" if conf > 0.5 else "#FFCDD2")
-            if si < self._src_list.count(): self._src_list.item(si).setBackground(c)
-            if ti < self._tgt_list.count(): self._tgt_list.item(ti).setBackground(c)
-        for i in range(self._src_list.count()):
-            if i not in aligned_src: self._src_list.item(i).setForeground(QColor("#BDBDBD"))
-        for i in range(self._tgt_list.count()):
-            if i not in aligned_tgt: self._tgt_list.item(i).setForeground(QColor("#BDBDBD"))
+            if si < self._src_list.count():
+                self._src_list.item(si).setBackground(c)
+            if ti < self._tgt_list.count():
+                self._tgt_list.item(ti).setBackground(c)
+
+        # Only gray unaligned if there ARE pairs
+        if self._pairs_data:
+            for i in range(self._src_list.count()):
+                if i not in aligned_src:
+                    self._src_list.item(i).setForeground(QColor("#BDBDBD"))
+            for i in range(self._tgt_list.count()):
+                if i not in aligned_tgt:
+                    self._tgt_list.item(i).setForeground(QColor("#BDBDBD"))
 
     def _on_src_sel(self, r):
         for i, (si, ti, _) in enumerate(self._pairs_data):

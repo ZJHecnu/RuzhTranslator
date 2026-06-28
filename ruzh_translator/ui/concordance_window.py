@@ -168,7 +168,7 @@ class ConcordanceWindow(QMainWindow):
         return w
 
     def _refresh_stats(self):
-        """Read tags directly from QComboBox widgets and show statistics."""
+        """Read tags from persistent _tag_data dict, fallback to QComboBox widgets."""
         total = self._kwic_table.rowCount()
         if total == 0:
             self._stats_view.setPlainText("暂无检索数据。请先在「KWIC检索与标注」中检索。")
@@ -176,11 +176,14 @@ class ConcordanceWindow(QMainWindow):
 
         from collections import Counter
         tags = []
+        # First try persistent dict, then fallback to combobox widgets
         for r in range(total):
-            w = self._kwic_table.cellWidget(r, 4)
-            if isinstance(w, QComboBox):
-                t = w.currentText().strip()
-                if t: tags.append(t)
+            tag = self._tag_data.get(r, "")
+            if not tag:
+                w = self._kwic_table.cellWidget(r, 4)
+                if isinstance(w, QComboBox):
+                    tag = w.currentText().strip()
+            if tag: tags.append(tag)
 
         tagged = len(tags)
         counter = Counter(tags)
@@ -190,9 +193,12 @@ class ConcordanceWindow(QMainWindow):
                  f"已标注:   {tagged} ({tagged/total*100:.1f}%)" if total else "已标注: 0",
                  f"未标注:   {total - tagged}\n",
                  f"--- 标签分布 ---"]
-        for tag, count in counter.most_common():
-            bar = "█" * min(count * 30 // max(counter.values(), 1), 30)
-            lines.append(f"  {tag:15s} {count:4d}  {bar}")
+        if counter:
+            for tag, count in counter.most_common():
+                bar = "█" * min(count * 30 // max(counter.values(), 1), 30)
+                lines.append(f"  {tag:15s} {count:4d}  {bar}")
+        else:
+            lines.append("  (无标注数据)")
 
         self._stats_view.setPlainText("\n".join(lines))
 
@@ -229,7 +235,7 @@ class ConcordanceWindow(QMainWindow):
         results = concordance_search(self._session, query, limit=200)
         span = self._span_spin.value()
         self._kwic_table.setRowCount(len(results))
-        self._kwic_data = results  # store for stats
+        self._tag_data = {}  # persistent tag storage: row -> tag string
         from PySide6.QtGui import QFont, QColor
 
         for i, r in enumerate(results):
@@ -239,17 +245,17 @@ class ConcordanceWindow(QMainWindow):
             left = src[max(0, idx-span):idx] if idx >= 0 else src[:span]
             right = src[idx+len(query):idx+len(query)+span] if idx >= 0 else ""
             keyword = src[idx:idx+len(query)] if idx >= 0 else query
-            # Bilingual KWIC: source context on left, target on right
             self._kwic_table.setItem(i, 1, QTableWidgetItem(f"...{left} {keyword} {right}..."))
             kw = QTableWidgetItem(keyword)
             kw.setForeground(QColor("#FF0000")); f = QFont(); f.setBold(True); kw.setFont(f)
             self._kwic_table.setItem(i, 2, kw)
             self._kwic_table.setItem(i, 3, QTableWidgetItem(tgt[:120]))
-            # Tag dropdown
+            # Tag dropdown with persistent storage
             cb = QComboBox(); cb.addItem("")
             cb.addItems(self._get_tag_list())
+            row_idx = i
+            cb.currentTextChanged.connect(lambda txt, r=row_idx: self._tag_data.update({r: txt}))
             self._kwic_table.setCellWidget(i, 4, cb)
-            # Hidden column stores full data
             self._kwic_table.setItem(i, 5, QTableWidgetItem(""))
             self._kwic_table.item(i, 5).setData(Qt.UserRole, r)
 
