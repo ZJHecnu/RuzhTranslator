@@ -68,21 +68,31 @@ class ConnectorWidget(QWidget):
 
 
 class AlignWorker(QThread):
-    """Paragraph-by-paragraph alignment — fast + shows real progress."""
+    """Paragraph-by-paragraph alignment with fallback to sequential."""
     finished = Signal(list)
     progress = Signal(int, int)
+    status_msg = Signal(str)
     error = Signal(str)
 
-    def __init__(self, src_paras, tgt_paras):
+    def __init__(self, src_paras, tgt_paras, use_semantic=True):
         super().__init__()
-        self.src_paras = src_paras  # list of paragraph texts
+        self.src_paras = src_paras
         self.tgt_paras = tgt_paras
+        self.use_semantic = use_semantic
 
     def run(self):
         try:
-            import numpy as np
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer("LaBSE")
+            # Try loading model
+            model = None
+            if self.use_semantic:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    self.status_msg.emit("正在加载 LaBSE 模型...")
+                    model = SentenceTransformer("LaBSE")
+                    self.status_msg.emit("模型加载完成，开始对齐...")
+                except Exception as e:
+                    self.status_msg.emit(f"模型加载失败({e})，使用顺序对齐...")
+                    model = None
 
             all_pairs = []
             pair_idx = 0
@@ -92,7 +102,6 @@ class AlignWorker(QThread):
                 src_para = self.src_paras[pi] if pi < len(self.src_paras) else ""
                 tgt_para = self.tgt_paras[pi] if pi < len(self.tgt_paras) else ""
 
-                # Split into sentences within each paragraph
                 src_sents = split_sentences(src_para, "ru")
                 tgt_sents = split_sentences(tgt_para, "zh-CN")
 
@@ -100,23 +109,28 @@ class AlignWorker(QThread):
                     self.progress.emit(pi + 1, total)
                     continue
 
-                # Encode and match within this paragraph (fast!)
-                src_emb = model.encode(src_sents, show_progress_bar=False)
-                tgt_emb = model.encode(tgt_sents, show_progress_bar=False)
-                src_n = src_emb / np.linalg.norm(src_emb, axis=1, keepdims=True)
-                tgt_n = tgt_emb / np.linalg.norm(tgt_emb, axis=1, keepdims=True)
+                if model is not None:
+                    # Semantic matching
+                    import numpy as np
+                    src_emb = model.encode(src_sents, show_progress_bar=False)
+                    tgt_emb = model.encode(tgt_sents, show_progress_bar=False)
+                    src_n = src_emb / np.linalg.norm(src_emb, axis=1, keepdims=True)
+                    tgt_n = tgt_emb / np.linalg.norm(tgt_emb, axis=1, keepdims=True)
 
-                # Greedy matching (same as user's reference code)
-                if len(src_sents) >= len(tgt_sents):
-                    for si, srow in enumerate(src_n):
-                        scores = np.dot(tgt_n, srow)
-                        best_ti = int(np.argmax(scores))
-                        all_pairs.append((pair_idx + si, pair_idx + best_ti, float(scores[best_ti])))
+                    if len(src_sents) >= len(tgt_sents):
+                        for si, srow in enumerate(src_n):
+                            scores = np.dot(tgt_n, srow)
+                            best_ti = int(np.argmax(scores))
+                            all_pairs.append((pair_idx + si, pair_idx + best_ti, float(scores[best_ti])))
+                    else:
+                        for ti, trow in enumerate(tgt_n):
+                            scores = np.dot(src_n, trow)
+                            best_si = int(np.argmax(scores))
+                            all_pairs.append((pair_idx + best_si, pair_idx + ti, float(scores[best_si])))
                 else:
-                    for ti, trow in enumerate(tgt_n):
-                        scores = np.dot(src_n, trow)
-                        best_si = int(np.argmax(scores))
-                        all_pairs.append((pair_idx + best_si, pair_idx + ti, float(scores[best_si])))
+                    # Sequential fallback: simple zip
+                    for k in range(max(len(src_sents), len(tgt_sents))):
+                        all_pairs.append((pair_idx + k, pair_idx + k, 0.5))
 
                 pair_idx += max(len(src_sents), len(tgt_sents))
                 self.progress.emit(pi + 1, total)
@@ -304,7 +318,9 @@ class AlignerWindow(QMainWindow):
         self._progress.setValue(0)
         self._status.setText(f"⏳ 对齐中... 0/{total} 段")
 
-        self._worker = AlignWorker(src_paras, tgt_paras)
+        use_semantic = "语义" in self._method_combo.currentText()
+        self._worker = AlignWorker(src_paras, tgt_paras, use_semantic=use_semantic)
+        self._worker.status_msg.connect(lambda msg: self._status.setText(f"⏳ {msg}"))
         self._worker.progress.connect(lambda cur, tot: (
             self._progress.setValue(cur),
             self._status.setText(f"⏳ 对齐中... {cur}/{tot} 段 ({cur*100//tot}%)")
